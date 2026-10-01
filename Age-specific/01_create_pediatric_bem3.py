@@ -1,5 +1,5 @@
 """
-workflow:
+workflow inspired by O’Reilly et al., (2021):
 1. disconnected-artifact cleanup
 2. nested mask
 3. marching cubes
