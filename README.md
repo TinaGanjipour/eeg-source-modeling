@@ -103,7 +103,7 @@ The same sensor geometry was used for the participant-specific MRI, pediatric ag
 
 ## Source reconstruction and biomarker analysis
 
-The anatomical models and EEG sensor information were combined to compute the forward solution for each reconstruction strategy using the NBT pipeline. The forward models were then used for EEG source reconstruction, followed by cortical parcellation and neurophysiological biomarker extraction.
+The anatomical models and EEG sensor information were combined to compute the forward solution for each reconstruction strategy using the NBT pipeline. The forward models were then used for EEG source reconstruction, followed by cortical parcellation and downstream analysis.
 
 ```text
 Anatomical model + EEG sensor information
@@ -112,13 +112,11 @@ Forward solution
         ↓
 EEG source reconstruction
         ↓
-Schaefer2018 100-parcel cortical parcellation
+Schaefer2018 100-parcel cortical parcellation organized according to the Yeo 7-network system
         ↓
-Parcel-level biomarker extraction
+Biomarkers: absolute power / relative power / DFA / fE/I
         ↓
-DFA / fE/I / absolute power / relative power
-        ↓
-Statistical comparison of reconstruction strategies
+Downstream analysis
 ```
 
 The same downstream source-reconstruction and biomarker-analysis workflow was applied to the participant-specific MRI, pediatric age-specific template, and adult `fsaverage` models.
