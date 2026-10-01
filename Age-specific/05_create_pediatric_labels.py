@@ -1,4 +1,4 @@
-"""Morph fsaverage Schaefer-100/Yeo-7 annotations to all age templates"""
+# morph fsaverage Schaefer-100/Yeo-7 annotations to all age templates
 
 from __future__ import annotations
 import re
