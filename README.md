@@ -11,8 +11,7 @@ Three anatomical modelling strategies were used:
 2. Pediatric age-specific templates from Richards et al.'s database
 3. Participant-specific MRI models
 
-All approaches ultimately produced the anatomical inputs required for EEG
-forward modelling: three-layer BEM surfaces (Conductivities were set as brain: 0.3 S/m, skull: 0.006 S/m, scalp: 0.3 S/m), cortical source space, and
+All approaches ultimately produced the anatomical inputs required for EEG forward modelling: three-layer BEM surfaces (conductivities were set as brain: 0.3 S/m, skull: 0.006 S/m, scalp: 0.3 S/m), cortical source space (ico5), and
 head-to-MRI transformation.
 
 ### Adult template
@@ -30,6 +29,25 @@ selected and vertex/face indices were rebuilt. Each surface was
 spherically decimated to 5,120 triangles, repaired for mesh defects,
 and checked/corrected for intersections between the nested BEM layers.
 
+Workflow:
+```text
+Nested anatomical masks
+        ↓
+Marching-cubes surface extraction
+        ↓
+Laplacian smoothing
+        ↓
+Largest face-connected component
+        ↓
+Spherical decimation to 5,120 triangles
+        ↓
+Mesh-defect repair
+        ↓
+BEM surface-intersection correction
+        ↓
+Three-layer BEM
+```
+
 ### Participant-specific MRI models
 
 Participant T1-weighted MRIs were processed with FreeSurfer `recon-all`.
@@ -37,6 +55,27 @@ Three-layer BEM surfaces were subsequently generated using
 `mri_watershed`. BEM surfaces underwent visual and numerical quality
 control before being used for source-space construction and EEG-to-MRI
 registration.
+
+Workflow:
+```text
+T1-weighted MRI
+      ↓
+FreeSurfer recon-all
+      ↓
+mri_watershed
+      ↓
+Three BEM surfaces
+      ↓
+Visual BEM QC
+      ↓
+Numerical and computational BEM QC
+      ↓
+EEG ↔ MRI transformation
+      ↓
+ico-5 cortical source space
+      ↓
+Forward model
+```
 
 ## EEG electrode information
 
@@ -64,7 +103,7 @@ The same sensor geometry was used for the participant-specific MRI, pediatric ag
 
 ## Source reconstruction and biomarker analysis
 
-The anatomical models and EEG sensor information were combined to compute the forward solution for each reconstruction strategy. The forward models were then used for EEG source reconstruction, followed by cortical parcellation and neurophysiological biomarker extraction.
+The anatomical models and EEG sensor information were combined to compute the forward solution for each reconstruction strategy using the NBT pipeline. The forward models were then used for EEG source reconstruction, followed by cortical parcellation and neurophysiological biomarker extraction.
 
 ```text
 Anatomical model + EEG sensor information
@@ -85,6 +124,8 @@ Statistical comparison of reconstruction strategies
 The same downstream source-reconstruction and biomarker-analysis workflow was applied to the participant-specific MRI, pediatric age-specific template, and adult `fsaverage` models.
 
 
-Tina Ganjipour
-MSc Bioinformatics and Systems Biology  
+<sub><em>
+Tina Ganjipour<br>
+MSc Bioinformatics and Systems Biology<br>
 Vrije Universiteit Amsterdam / University of Amsterdam
+</em></sub>
