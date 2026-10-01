@@ -1,4 +1,4 @@
-"""Create and verify ico5 source spaces for pediatric template subjects"""
+# create and verify ico5 source spaces for pediatric template subjects
 
 from __future__ import annotations
 import json
