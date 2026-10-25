@@ -1,13 +1,12 @@
-"""Fit one common EEG digitization to every pediatric template.
+"""Fit EEG digitization to every pediatric template.
 
 For every ``ANTS{age}Years3T`` subject in ``--subjects-dir``:
 
-1. read one EEG file without modifying it
+1. read the EEG file without modifying it
 2. copy its Info and remove EEG DigPoint IDs 48, 119, 126, and 127
 3. fit fiducials with LPA=1, nasion=10, RPA=1
 4. run EEG-only ICP for 100 iterations with every non-EEG weight set to zero
-5. write the transform, numerical EEG-only QC, per-point distances, and one
-   four-view alignment montage.
+5. write the transform, numerical EEG-only QC, per-point distances, and one four-view alignment montage
 """
 
 from __future__ import annotations
