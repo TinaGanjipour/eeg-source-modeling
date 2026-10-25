@@ -1,15 +1,18 @@
-"""Fit EEG digitization to every pediatric template.
+#!/usr/bin/env python3
+"""
+To ensure that the source space, BEM surfaces, and electrode positions were represented in a common coordinate system, coregistration was performed.
+This procedure estimates the rigid-body transformation, consisting of rotations and translations, required to align the EEG head-coordinate system with the MRI coordinate system used for the anatomical and BEM models (Gramfort et al. 2013).
 
 For every ``ANTS{age}Years3T`` subject in ``--subjects-dir``:
-
-1. read the EEG file without modifying it
-2. copy its Info and remove EEG DigPoint IDs 48, 119, 126, and 127
+1. read the EEG file
+2. remove EEG DigPoint IDs 48, 119, 126, and 127
 3. fit fiducials with LPA=1, nasion=10, RPA=1
-4. run EEG-only ICP for 100 iterations with every non-EEG weight set to zero
+4. refine the alignment using the iterative closest point (ICP) algorithm for 100 iterations with every non-EEG weight set to zero
 5. write the transform, numerical EEG-only QC, per-point distances, and one four-view alignment montage
 """
 
 from __future__ import annotations
+import argparse
 import csv
 import hashlib
 import json
@@ -17,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
@@ -215,9 +219,19 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
     temporary.replace(path)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--subjects-dir", type=Path, required=True)
+    parser.add_argument("--eeg-path", type=Path, required=True)
+    parser.add_argument("--backend", default="pyvistaqt")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--no-render", action="store_true")
+    return parser.parse_args()
+
+
 def main() -> int:
-    subjects_dir = SUBJECTS_DIR.expanduser().resolve()
-    eeg_path = EEG_PATH.expanduser().resolve()
+    args = parse_args()
+    subjects_dir = args.subjects_dir.expanduser().resolve()
     eeg_path = args.eeg_path.expanduser().resolve()
     if not subjects_dir.is_dir():
         raise NotADirectoryError(subjects_dir)
@@ -238,7 +252,7 @@ def main() -> int:
     print(f"Original EEG DigPoints: {original_count}")
     print(f"Removed IDs present in file: {removed_ids}")
     print(f"EEG DigPoints used for fitting/QC: {filtered_count}")
-    if not RENDER:
+    if not args.no_render:
         mne.viz.set_3d_backend(args.backend)
 
     qc_root = subjects_dir / "trans_qc_common_eeg_drop48_119_126_127"
@@ -266,12 +280,12 @@ def main() -> int:
             if missing:
                 raise FileNotFoundError(f"Missing required files: {missing}")
 
-            if trans_path.exists() and not OVERWRITE:
+            if trans_path.exists() and not args.overwrite:
                 raise FileExistsError(
                     f"Transform already exists (use --overwrite to replace): {trans_path}"
                 )
             trans = fit_transform(info_fit, subject, subjects_dir)
-            mne.write_trans(str(trans_path), trans, overwrite=OVERWRITE, verbose=False)
+            mne.write_trans(str(trans_path), trans, overwrite=args.overwrite, verbose=False)
             trans_readback = mne.read_trans(str(trans_path), return_all=False, verbose=False)
             distances = distances_mm(info_fit, trans_readback, subject, subjects_dir)
             if len(distances) != filtered_count:
@@ -307,7 +321,7 @@ def main() -> int:
                 }
                 for point_id, distance in zip(point_ids, distances)
             )
-            if not RENDER:
+            if not args.no_render:
                 render_montage(
                     info_fit,
                     trans_path,
@@ -383,3 +397,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+"""
+References:
+Alexandre Gramfort, Martin Luessi, Eric Larson, Denis A. Engemann, Daniel Strohmeier, Christian Brodbeck, Lauri Parkkonen, Matti S. Hämäläinen, MNE software for processing MEG and EEG data, NeuroImage, Volume 86, 2014, Pages 446-460, ISSN 1053-8119, https://doi.org/10.1016/j.neuroimage.2013.10.027.
+"""
