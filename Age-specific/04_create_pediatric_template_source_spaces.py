@@ -1,6 +1,14 @@
-# create and verify ico5 source spaces for pediatric template subjects
+#!/usr/bin/env python3
+"""
+Create and verify ico5 source spaces for pediatric template subjects.
+
+The source space defined the candidate locations of the elementary current dipoles on the cortical surface (Gramfort et al. 2013).
+The source space was constructed on the white-matter surfaces of the left and right cerebral hemispheres using the anatomical metadata provided with each cortical reconstruction.
+For each modeling branch, the ico-5 parameter was selected to maintain compatibility with the NBT pipeline.
+"""
 
 from __future__ import annotations
+import argparse
 import json
 import re
 from datetime import datetime
@@ -8,9 +16,6 @@ from pathlib import Path
 import mne
 import numpy as np
 
-SUBJECTS_DIR = Path("")
-AGE = None
-OVERWRITE = False
 SUBJECT_RE = re.compile(
     r"^ANTS(?P<age>\d+-(?:0|5))Years3T$"
 )
@@ -128,21 +133,30 @@ def create_one(subjects_dir: Path, age: str, subject: str, overwrite: bool) -> d
     }
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--subjects-dir", type=Path, required=True)
+    parser.add_argument("--age", help="One age such as 7-0; omit to process all")
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
+
+
 def main() -> int:
-    subjects_dir = SUBJECTS_DIR.expanduser().resolve()
+    args = parse_args()
+    subjects_dir = args.subjects_dir.expanduser().resolve()
     if not subjects_dir.is_dir():
         raise NotADirectoryError(subjects_dir)
-    if AGE is not None and not re.fullmatch(r"\d+-(?:0|5)", AGE):
-        raise ValueError(f"Invalid age: {AGE}")
+    if args.age is not None and not re.fullmatch(r"\d+-(?:0|5)", args.age):
+        raise ValueError(f"Invalid age: {args.age}")
 
     qc_dir = subjects_dir / "source_space_qc"
     qc_dir.mkdir(exist_ok=True)
     failures = []
-    subjects = discover_subjects(subjects_dir, AGE)
+    subjects = discover_subjects(subjects_dir, args.age)
     for index, (age, subject) in enumerate(subjects, start=1):
         print(f"[{index}/{len(subjects)}] AGE={age} SUBJECT={subject}", flush=True)
         try:
-            record = create_one(subjects_dir, age, subject, OVERWRITE)
+            record = create_one(subjects_dir, age, subject, args.overwrite)
             qc_path = qc_dir / f"ANTS{age}Years3T-src-qc.json"
             qc_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
             print(f"SOURCE_SPACE_STATUS={record['status']}")
@@ -165,3 +179,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+"""
+References:
+Alexandre Gramfort, Martin Luessi, Eric Larson, Denis A. Engemann, Daniel Strohmeier, Christian Brodbeck, Lauri Parkkonen, Matti S. Hämäläinen, MNE software for processing MEG and EEG data, NeuroImage, Volume 86, 2014, Pages 446-460, ISSN 1053-8119, https://doi.org/10.1016/j.neuroimage.2013.10.027.
+"""
