@@ -66,7 +66,7 @@ SUBJECTS_DIR = Path("")
 BEM_VOLUME_DIR = SUBJECTS_DIR # The segmented volume obtained from John E. Richard et al., 2016.
 OUTPUT_SUBJECTS_DIR = Path("")
 
-ALL_AGES = tuple(f"{year}-{half}" for year in range(6, 17) for half in (1, 0))
+ALL_AGES = tuple(f"{year}-0" for year in range(6, 18))
 AGES: Sequence[str] = ALL_AGES
 OVERWRITE = False
 
