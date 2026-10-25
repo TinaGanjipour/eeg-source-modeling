@@ -1,18 +1,44 @@
+#!/usr/bin/env python3
 """
-workflow inspired by O’Reilly et al., (2021):
-1. disconnected-artifact cleanup
-2. nested mask
-3. marching cubes
-4. MRI affine/CRAS conversion
-5. fix normals
-6. Laplacian smoothing (λ=0.8, 15 iterations)
-7. defect correction
-8. largest-component selection
-9. sphere decimation to 5120
-10. defect correction 
-11. write three final BEM surfaces
-12. MNE BEM model
-13. MNE BEM solution
+Pediatric age-specific BEM surface reconstruction pipeline.
+
+The BEM surface extraction, geometric processing, mesh-repair, and intersection-correction procedures were adapted from:
+Christian O'Reilly, Eric Larson, John E. Richards, Mayada Elsabbagh (2021)
+Structural templates for imaging EEG cortical sources in infants. NeuroImage, 227, 117682.
+https://doi.org/10.1016/j.neuroimage.2020.117682.
+https://github.com/christian-oreilly/infant_template_paper
+
+Anatomical inputs:
+Neurodevelopmental MRI Database (Richards et al., 2016).
+
+In this study, the templates from the children and adolescent’s sets were used, covering ages 6.0 – 17.0 years, at one-year intervals.
+
+Workflow (adapted from O'Reilly et al., 2021):
+1. Disconnected-artifact cleanup
+2. Convert the segmented average MRI volume into cumulative binary masks
+3. Extract the BEM surface using marching cubes (isovalue = 0.5)
+4. Convert voxel coordinates into FreeSurfer surface RAS
+5. Correct surface-normal orientation
+6. Apply Laplacian smoothing (λ = 0.8, 15 iterations)
+7. Perform mesh defect detection, repair, and validation
+8. Largest-component selection
+9. Apply spherical decimation to 5120 triangles per surface
+10. Repeat mesh defect detection, repair, and validation
+11. Perform pial-to-inner-skull intersection correction
+12. Construct the three-layer MNE BEM model and solution
+
+Geometric and topological quality control:
+- Degenerate triangle detection and removal
+- Detection of vertices incident to fewer than three triangles
+- Removal of isolated vertices
+- Removal of dangling faces and associated vertices
+- Local triangle reconstruction around two-face vertices
+- Mesh vertex reindexing after deletion
+- Hole repair using PyMeshFix
+- Surface-normal correction after hole repair
+- Solid-angle-based surface completeness checks
+- Watertightness checks
+- Final validation of mesh integrity
 """
 from __future__ import annotations
 import csv
@@ -37,25 +63,57 @@ from nibabel.freesurfer.io import read_geometry, write_geometry
 from skimage import measure
 
 SUBJECTS_DIR = Path("")
-BEM_VOLUME_DIR = SUBJECTS_DIR
+BEM_VOLUME_DIR = SUBJECTS_DIR # The segmented volume obtained from John E. Richard et al., 2016.
 OUTPUT_SUBJECTS_DIR = Path("")
 
-ALL_AGES = tuple(f"{year}-{half}" for year in range(6, 17) for half in (0, 5))
+ALL_AGES = tuple(f"{year}-{half}" for year in range(6, 17) for half in (1, 0))
 AGES: Sequence[str] = ALL_AGES
 OVERWRITE = False
 
+"""
+Sphere decimation of surfaces to 5120 triangles was intended to make the comparison between the three anatomical modelling strategies methodologically consistent and interpretable.
+5120 triangles correspond to an icosahedral subdivision grade of 4 (ico=4) in MNE-Python.
+In this study, we compared three anatomical strategies:
+1. Participant-specific MRI
+2. Pediatric age-specific templates
+3. Adult template (fsaverage)
+By using the same target number of triangles for all three strategies, we aimed to standardize the BEM mesh resolution, so that differences in EEG source reconstruction would primarily reflect differences in anatomical modelling rather than differences in mesh density.
+"""
 TARGET_TRIANGLES = 5120
+
+"""
+These are the brain, skull, and scalp conductivities, respectively, in S/m.
+The same conductivity values were applied throughout the developmental range.
+"""
 CONDUCTIVITY = (0.3, 0.006, 0.3)
+
+"""
+Pial-to-inner-skull intersection correction:
+MAX_CORRECTION_DISTANCE_MM determines which geometric inconsistencies are small enough to attempt to correct.
+MOVE_MARGIN_MM determines how much additional displacement is applied beyond the detected intersection distance.
+"""
 MOVE_MARGIN_MM = 0.5
 MAX_CORRECTION_DISTANCE_MM = 5.0
 
-# build nested binary masks for BEM layers:
+"""The segmented BEM3 NIfTI contains three nested tissue compartments and background.
+Every voxel is labeled.
+Instead of independently extracting each exact label as a separate tissue class, they are constructed cumulative masks (O'Reilly et al. 2021).
+
+- outer_skin: labels 1, 2, and 3
+- outer_skull: labels 1 and 2
+- inner_skull: label 1
+​"""
 SURFACE_LABELS = {
     "outer_skin": (1, 2, 3),
     "outer_skull": (1, 2),
     "inner_skull": (1,),
 }
 
+"""During BEM model construction, MNE-Python checks whether the three anatomical boundary surfaces are correctly nested:
+the inner skull must lie entirely within the outer skull, and the outer skull within the scalp surface.
+These checks are essential because valid, non-intersecting BEM boundaries are required to compute the BEM solution, which is subsequently used for EEG forward modelling.
+These nesting violations are identified through MNE-generated error messages and the affected surface pairs are recorded by classify_mne_nesting_failure function for further correction.
+"""
 NESTING_PATTERNS = {
     "inner_skull_vs_outer_skull": re.compile(
         r"Surface inner skull is not (?:completely )?inside surface outer skull",
@@ -64,12 +122,17 @@ NESTING_PATTERNS = {
     "outer_skull_vs_outer_skin": re.compile(
         r"Surface outer skull is not (?:completely )?inside surface outer skin",
         re.IGNORECASE,
-    ),}
+    ),
+}
 
 def output_subject_name(age: str) -> str:
     return f"ANTS{age}Years3T"
 
-
+"""
+The MRI inputs:
+1. The segmented average MRI (AVG{age}Years3T_segmented_BEM3.nii.gz). The three BEM boundaries are extracted from these.
+2. The FreeSurfer anatomical files, used for coordinate metadata and cortical surface geometry.
+"""
 def input_paths(age: str) -> dict[str, Path]:
     source_subject = f"ANTS{age}Years3T"
     subject_dir = SUBJECTS_DIR / source_subject
@@ -83,7 +146,6 @@ def input_paths(age: str) -> dict[str, Path]:
         "t1": subject_dir / "mri" / "T1.mgz",
     }
 
-
 def preflight() -> None:
     missing = []
     for age in AGES:
@@ -96,31 +158,34 @@ def preflight() -> None:
             "Missing inputs:\n" + "\n".join(f"  {path}" for path in missing)
         )
 
+"""
+Small disconnected pieces in the segmentation could generate unwanted surfaces during marching cubes.
+Connected-component analysis is applied to the non-background voxels to identify disconnected artifacts (O'Reilly et al. 2021).
+The procedure retains the background and main foreground components and sets the remaining components to zero.
+"""
 def correct_line_artefact(volume: np.ndarray) -> None:
-    components = cc3d.connected_components((volume != 0).astype(int))
+    components = cc3d.connected_components((volume != 0).astype(int)) # Connected-component analysis: find spatially connected regions in the segmented MRI.
     label_id, count = np.unique(components, return_counts=True)
-    id_zero, id_non_zero = label_id[count > 500_000]
+    id_zero, id_non_zero = label_id[count > 500_000] # Exactly two connected-component labels exceed 500,000 voxels
     artefact = np.where((components != id_zero) & (components != id_non_zero))
-    volume[artefact] = 0
+    volume[artefact] = 0 # then we keep the large connected components identified by its size threshold and set the remaining components to zero.
 
-# a closed surface should subtend the expected complete solid angle around an internal point
+# Solid-angle-based surface completeness check: evaluating whether the mesh forms a consistently oriented, closed enclosure around the selected reference point.
 def surface_is_complete(vertices: np.ndarray, faces: np.ndarray) -> bool:
     center = vertices.mean(axis=0)
     total_angle = _get_solids(vertices[faces], center[np.newaxis, :])[0]
     proportion = total_angle / (2 * np.pi)
     return bool(np.abs(proportion - 1.0) < 1e-5)
 
-
+# Degenerate face = zero-area and near-zero-area triangles (O'Reilly et al., 2021)
 def nondegenerate_face_mask(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     mesh = trimesh.Trimesh(vertices, faces)
     if hasattr(mesh, "nondegenerate_faces"):
         return np.asarray(mesh.nondegenerate_faces(), dtype=bool)
     return np.asarray(mesh.remove_degenerate_faces(), dtype=bool)
 
-# degenerate faces = zero-area and near-zero-area triangles 
 def has_degenerate_faces(vertices: np.ndarray, faces: np.ndarray) -> bool:
     return not bool(np.all(nondegenerate_face_mask(vertices, faces)))
-
 
 def remove_degenerate_faces(
     vertices: np.ndarray, faces: np.ndarray
@@ -132,7 +197,7 @@ def remove_degenerate_faces(
         mesh.remove_degenerate_faces()
     return np.asarray(mesh.vertices), np.asarray(mesh.faces, dtype=np.int32)
 
-
+# Identify potentially defective vertices by counting the number of triangular faces incident to each vertex (O'Reilly et al., 2021).
 def get_topological_defects(
     vertices: np.ndarray, faces: np.ndarray
 ) -> tuple[list[int], list[int], list[int]]:
@@ -140,11 +205,11 @@ def get_topological_defects(
     zero, one, two = [], [], []
     for vertex_id, triangles in enumerate(neighbors):
         if len(triangles) == 0:
-            zero.append(vertex_id)
+            zero.append(vertex_id) # 0 faces: isolated vertex, not connected to any triangle
         elif len(triangles) == 1:
-            one.append(vertex_id)
+            one.append(vertex_id) # 1 face: vertex belonging to only one triangle
         elif len(triangles) == 2:
-            two.append(vertex_id)
+            two.append(vertex_id) # 2 faces: vertex belonging to only two triangles
     return zero, one, two
 
 
@@ -152,6 +217,10 @@ def has_topological_defects(vertices: np.ndarray, faces: np.ndarray) -> bool:
     return any(len(group) for group in get_topological_defects(vertices, faces))
 
 
+"""
+The two triangles sharing the defective vertex are identified and scheduled for removal (O'Reilly et al., 2021).
+Their remaining unique vertices are used to construct a single replacement triangle, eliminating the underconnected vertex.
+"""
 def correction_two_neighboring_triangles(
     vertices: np.ndarray, faces: np.ndarray, faulty_vertices: Sequence[int]
 ) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -173,7 +242,11 @@ def correction_two_neighboring_triangles(
         new_faces.append(new_face)
     return np.asarray(faces_to_remove, dtype=int), new_faces
 
-
+"""
+In triangular meshes, the faces array does not directly store coordinates.
+Instead, each face stores three indices pointing to entries in the vertices array.
+If you remove a vertex, the remaining vertices must be renumbered. Hence, we update mesh vertex indices after defective vertices have been removed (O'Reilly et al., 2021).
+"""
 def reindex_vertices(
     vertices: np.ndarray, faces: np.ndarray, vertices_to_remove: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -184,7 +257,14 @@ def reindex_vertices(
     faces = faces - decrement[faces]
     return vertices, faces
 
-
+"""
+fix_topological_defects() handles the three categories returned by get_topological_defects().
+For each category, the intended behavior (detected defect → intended correction) is:
+Zero-face vertex → Remove the isolated vertex
+One-face vertex → Remove the affected face and vertex
+Two-face vertex → Replace the two neighboring triangles with one triangle, then remove the defective vertex
+(O'Reilly et al., 2021)
+"""
 def fix_topological_defects(
     vertices: np.ndarray, faces: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -212,7 +292,11 @@ def fix_topological_defects(
         vertices, faces = reindex_vertices(vertices, faces, vertices_to_remove)
     return np.asarray(vertices), np.asarray(faces, dtype=np.int32)
 
-
+"""
+If a surface contains an opening caused by missing triangles, it may be possible to reconstruct the missing region and produce a closed surface.
+MeshFix attempts to correct defects such as holes and reconstruct a valid triangular surface.
+(O'Reilly et al., 2021)
+"""
 def repair_holes(
     vertices: np.ndarray, faces: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -220,8 +304,8 @@ def repair_holes(
     meshfix.repair()
     repaired_vertices = meshfix.v if hasattr(meshfix, "v") else meshfix.points
     repaired_faces = meshfix.f if hasattr(meshfix, "f") else meshfix.faces
-    mesh = trimesh.Trimesh(vertices=repaired_vertices, faces=repaired_faces)
-    trimesh.repair.fix_normals(mesh, multibody=False)
+    mesh = trimesh.Trimesh(vertices=repaired_vertices, faces=repaired_faces) # convert the repaired result back to a Trimesh object
+    trimesh.repair.fix_normals(mesh, multibody=False) # correct normal orientation
     return np.asarray(mesh.vertices), np.asarray(mesh.faces, dtype=np.int32)
 
 
@@ -233,7 +317,7 @@ def check_mesh(vertices: np.ndarray, faces: np.ndarray) -> None:
     if has_degenerate_faces(vertices, faces):
         raise RuntimeError("Surface has degenerate faces.")
     if not trimesh.Trimesh(vertices, faces).is_watertight:
-        raise RuntimeError("Surface is not watertight.")
+        raise RuntimeError("Surface is not watertight.") # watertight = surface behaving like a closed subject (every mesh edge belongs to exactly two faces)
 
 
 def fix_all_defects(
@@ -255,8 +339,12 @@ def fix_all_defects(
         vertices, faces = repair_holes(vertices, faces)
     check_mesh(vertices, faces)
     return vertices, faces
-
-
+"""
+Separate the triangular mesh into connected components and retain the largest component by triangle count (Dogdas et al., 2005).
+It removes smaller disconnected mesh fragments that may remain after surface extraction and repair.
+If only one connected component exists, the original mesh is returned unchanged.
+The selected main component is then passed to spherical surface decimation.
+"""
 def select_largest_component(
     vertices: np.ndarray, faces: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -274,7 +362,12 @@ def select_largest_component(
     main = max(components, key=lambda component: len(component.faces))
     return np.asarray(main.vertices), np.asarray(main.faces, dtype=np.int32)
 
-
+"""
+Marching cubes takes a three-dimensional binary mask and extracts a polygonal boundary between the inside and outside.
+The resulting mesh contains vertices (3D coordinates of mesh points) and faces (triangles connecting the vertices).
+The level=0.5 parameter determines the boundary between values 0 (outside) and 1 (inside).
+(O'Reilly et al. 2021)
+"""
 def extract_surface(
     mask: np.ndarray,
     affine: np.ndarray,
@@ -282,22 +375,34 @@ def extract_surface(
     destination: Path,
 ) -> None:
     vertices, faces = measure.marching_cubes(
-        # convert the binary 3D mask into vertices and triangular faces:
         mask.astype(float),
         level=0.5,
         spacing=(1, 1, 1),
         allow_degenerate=False,
         method="lewiner",
     )[:2]
+    """
+    Marching-cubes output is in voxel coordinates, and the new BEM surfaces are transformed to share the appropriate coordinate frame with the FreeSurfer cortical surfaces using cras.
+    The cras metadata comes from the FreeSurfer lh.white surface:
+    """
     vertices = (
-        # convert voxel coordinates into FreeSurfer surface coordinates:
         vertices @ affine[:3, :3]
         + affine[:3, 3]
         - np.asarray(volume_info["cras"])
     )
 
+    """
+    Fixing surface orientation (O'Reilly et al. 2021):
+    The orientation matters because MNE expects surfaces with consistent outward orientation.
+    Incorrect normals can cause problems when constructing the BEM.
+    """
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
     trimesh.repair.fix_normals(mesh, multibody=False)
+
+    """
+    To reduce small irregularities introduced by the voxel-based segmentation and surface extraction, Laplacian smoothing is applied (O'Reilly et al. 2021).
+    The parameter lamb=0.8 controls the smoothing strength, and iterations=15 specifies how many smoothing passes are performed.
+    """
     mesh = trimesh.smoothing.filter_laplacian(
         deepcopy(mesh), lamb=0.8, iterations=15, volume_constraint=True
     )
@@ -310,6 +415,8 @@ def extract_surface(
     )
 
     vertices, faces = select_largest_component(vertices, faces)
+    
+    # Spherical decimation (O'Reilly et al. 2021)
     vertices, faces = decimate_surface(
         vertices, faces, n_triangles=TARGET_TRIANGLES, method="sphere"
     )
@@ -341,6 +448,16 @@ def process_bem_volume(bem_volume: Path, lh_white: Path, bem_dir: Path) -> None:
             bem_dir / f"{surface_name}.surf",
         )
 
+"""
+Pial-to-inner-skull intersection correction:
+Age-specific templates contain two independently derived anatomical structures:
+1. Pial surface: The outer boundary of the cerebral cortex, provided by the FreeSurfer-processed anatomical template.
+2. Inner-skull surface: The boundary surrounding the brain compartment, which we extracted from the segmented MRI using marching cubes.
+Ideally, the entire pial surface must be enclosed by the inner-skull boundary.
+However, because these surfaces originate from different processing procedures, they can occasionally intersect or cross one another.
+These anatomical intersections that could cause problems during source modelling.
+To ensure that the cortical pial surfaces lie inside the inner-skull BEM boundary, the affected inner-skull vertices were moved outward (O'Reilly et al. 2021).
+"""
 def intersection_deltas(
     inner_surface: Path,
     outer_surface: Path,
@@ -444,6 +561,7 @@ def correct_pial_intersections(subject_dir: Path, bem_dir: Path) -> dict[str, in
         )
     return movements
 
+# If MNE raises an error, below function identifies which surface pair caused it
 def classify_mne_nesting_failure(error_text: str) -> str | None:
     for pair_name, pattern in NESTING_PATTERNS.items():
         if pattern.search(error_text):
@@ -527,6 +645,12 @@ def create_subject(age: str) -> dict[str, object]:
 
     try:
         process_bem_volume(paths["bem_volume"], paths["lh_white"], bem_dir)
+        """
+        The BEM inner-skull boundary should enclose the cortical surfaces.
+        Intersections between the pial surface and inner skull can indicate anatomically inconsistent geometry.
+        So, we check the left and right pial surfaces against the inner-skull BEM surface.
+        Where a correction is identified, the inner-skull mesh vertices are displaced outward along their normals.
+        """
         pial_movements = correct_pial_intersections(staging_dir, bem_dir)
         mne_result = attempt_mne_model_and_solution(
             staging_subject, OUTPUT_SUBJECTS_DIR, output_subject
@@ -625,3 +749,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+"""
+References:
+Richards JE, Sanchez C, Phillips-Meek M, Xie W. A database of age-appropriate average MRI templates. Neuroimage. 2016;124(Pt B):1254-1259. doi:10.1016/j.neuroimage.2015.04.055
+Christian O'Reilly, Eric Larson, John E. Richards, Mayada Elsabbagh, Structural templates for imaging EEG cortical sources in infants, NeuroImage, Volume 227, 2021, 117682, ISSN 1053-8119, https://doi.org/10.1016/j.neuroimage.2020.117682.
+Dogdas B, Shattuck DW, Leahy RM. Segmentation of skull and scalp in 3-D human MRI using mathematical morphology. Hum Brain Mapp. 2005;26(4):273-285. doi:10.1002/hbm.20159
+"""
