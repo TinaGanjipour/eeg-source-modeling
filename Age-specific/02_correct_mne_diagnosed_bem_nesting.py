@@ -1,4 +1,17 @@
-# workflow inspired by O’Reilly et al., (2021)
+#!/usr/bin/env python3
+"""
+Correction of MNE-diagnosed BEM surface-nesting failures.
+
+01_create_pediatric_bem3.py generated the three BEM boundary surfaces and attempted to construct the corresponding MNE BEM models and solutions.
+During this process, MNE-Python checked whether the surfaces were correctly nested and recorded any failures, including the affected surface pairs.
+
+In our study, these nesting failures occurred only for templates of ages 6 and 7.
+
+For the affected templates, this script applies the intersection-correction procedure to the MNE-diagnosed BEM surface pairs, moving vertices of the outer surface outward where eligible intersections are detected.
+After each correction, MNE BEM model and solution construction is attempted again to assess whether the nesting problem has been resolved.
+
+The intersection-correction procedure was adapted from O'Reilly et al. (2021).
+"""
 from __future__ import annotations
 import csv
 import json
@@ -192,3 +205,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+"""
+References:
+Christian O'Reilly, Eric Larson, John E. Richards, Mayada Elsabbagh, Structural templates for imaging EEG cortical sources in infants, NeuroImage, Volume 227, 2021, 117682, ISSN 1053-8119, https://doi.org/10.1016/j.neuroimage.2020.117682.
+"""
