@@ -1,16 +1,33 @@
-# morph fsaverage Schaefer-100/Yeo-7 annotations to all age templates
+#!/usr/bin/env python3
+"""
+Morph the fsaverage Schaefer-100/Yeo-7 cortical parcellation onto the age-specific pediatric anatomical templates.
+
+Workflow:
+1. Read the Schaefer-100/Yeo-7 annotation from fsaverage.
+2. Exclude unknown/medial-wall labels, retaining 100 cortical ROIs (50 per hemisphere).
+3. Identify the age-specific anatomical templates and verify the required FreeSurfer surfaces.
+4. Morph the 100 cortical labels from fsaverage onto each pediatric template using MNE-Python.
+5. Write the morphed labels as subject-specific FreeSurfer annotation files (.annot).
+6. MNE assigns vertices not covered by the morphed ROIs to an additional "unknown" label in each hemisphere, where uncovered vertices exist.
+7. Read back and validate the annotations, expecting 102 labels: 100 Schaefer ROIs + 2 unknown labels.
+8. In the subsequent source reconstruction pipeline, the unknown labels are excluded so that the 100 Schaefer ROIs are used for regional analysis.
+
+Additional quality control:
+- Confirm 50 cortical ROIs per hemisphere.
+- Verify that ROI names match the fsaverage parcellation.
+- Check for empty morphed ROIs.
+- Detect missing or invalid annotation files.
+- Skip existing annotations that already pass validation.
+"""
 
 from __future__ import annotations
+import argparse
 import re
 from pathlib import Path
 import mne
 
 
 DEFAULT_PARC = "Schaefer2018_100Parcels_7Networks_order"
-SUBJECTS_DIR = Path("")
-PARC = DEFAULT_PARC
-WRITE = True
-OVERWRITE = False
 SUBJECT_RE = re.compile(r"^ANTS(?P<age>\d+-(?:0|5))Years3T$")
 
 
@@ -109,8 +126,26 @@ def annotation_paths(subject_dir: Path, parc: str) -> tuple[Path, Path]:
     )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--subjects-dir", type=Path, required=True)
+    parser.add_argument("--parc", default=DEFAULT_PARC)
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write annotations. Without this option, perform a dry run.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace incomplete or invalid existing annotation pairs.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
-    subjects_dir = SUBJECTS_DIR.expanduser().resolve()
+    args = parse_args()
+    subjects_dir = args.subjects_dir.expanduser().resolve()
     if not subjects_dir.is_dir():
         raise NotADirectoryError(subjects_dir)
 
@@ -131,7 +166,7 @@ def main() -> int:
 
     template_all = mne.read_labels_from_annot(
         subject="fsaverage",
-        parc=PARC,
+        parc=args.parc,
         subjects_dir=str(subjects_dir),
         sort=True,
         verbose="ERROR",
@@ -169,7 +204,7 @@ def main() -> int:
             problems.append(f"{subject}: missing surfaces: {missing}")
             continue
 
-        lh_annot, rh_annot = annotation_paths(subject_dir, PARC)
+        lh_annot, rh_annot = annotation_paths(subject_dir, args.parc)
         existing = (lh_annot.is_file(), rh_annot.is_file())
         if existing == (False, False):
             planned.append(subject)
@@ -182,7 +217,7 @@ def main() -> int:
                 )
                 validate_labels(subject, labels, expected_names)
             except Exception as error:
-                if OVERWRITE:
+                if args.overwrite:
                     planned.append(subject)
                 else:
                     problems.append(
@@ -192,7 +227,7 @@ def main() -> int:
                 already_valid.append(subject)
             continue
 
-        if OVERWRITE:
+        if args.overwrite:
             planned.append(subject)
         else:
             problems.append(
@@ -200,7 +235,7 @@ def main() -> int:
             )
 
     print(f"Subjects directory:        {subjects_dir}")
-    print(f"Parcellation:              {PARC}")
+    print(f"Parcellation:              {args.parc}")
     print(f"Subjects:                  {len(subjects)}")
     print(f"Already valid:             {len(already_valid)}")
     print(f"Labels planned:            {len(planned)}")
@@ -212,7 +247,7 @@ def main() -> int:
             print(problem)
         raise RuntimeError("No annotations were written because preflight failed")
 
-    if not WRITE:
+    if not args.write:
         print("\nDRY RUN PASSED. No annotations were written.")
         print("Rerun the same command with --write.")
         return 0
@@ -220,7 +255,7 @@ def main() -> int:
     for index, subject in enumerate(planned, start=1):
         print(f"[{index}/{len(planned)}] Morphing labels: {subject}", flush=True)
         subject_dir = subjects_dir / subject
-        lh_annot, rh_annot = annotation_paths(subject_dir, PARC)
+        lh_annot, rh_annot = annotation_paths(subject_dir, args.parc)
         lh_annot.parent.mkdir(parents=True, exist_ok=True)
 
         labels_individual = mne.morph_labels(
@@ -245,9 +280,9 @@ def main() -> int:
         mne.write_labels_to_annot(
             labels_individual,
             subject=subject,
-            parc=PARC,
+            parc=args.parc,
             subjects_dir=str(subjects_dir),
-            overwrite=OVERWRITE,
+            overwrite=args.overwrite,
             sort=True,
             verbose="ERROR",
         )
@@ -271,3 +306,10 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+"""
+References:
+Alexandre Gramfort, Martin Luessi, Eric Larson, Denis A. Engemann, Daniel Strohmeier, Christian Brodbeck, Lauri Parkkonen, Matti S. Hämäläinen, MNE software for processing MEG and EEG data, NeuroImage, Volume 86, 2014, Pages 446-460, ISSN 1053-8119, https://doi.org/10.1016/j.neuroimage.2013.10.027.
+Alexander Schaefer, Ru Kong, Evan M Gordon, Timothy O Laumann, Xi-Nian Zuo, Avram J Holmes, Simon B Eickhoff, B T Thomas Yeo, Local-Global Parcellation of the Human Cerebral Cortex from Intrinsic Functional Connectivity MRI, Cerebral Cortex, Volume 28, Issue 9, September 2018, Pages 3095–3114, https://doi.org/10.1093/cercor/bhx179
+Thomas Yeo BT, Krienen FM, Sepulcre J, et al. The organization of the human cerebral cortex estimated by intrinsic functional connectivity. J Neurophysiol 106: 1125-1165, 2011. doi: 10.1152/jn.00338.2011.
+"""
